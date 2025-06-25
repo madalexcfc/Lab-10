@@ -1,68 +1,132 @@
-import json, time
+import os
+import requests
+import pyttsx3
+import pyaudio
+from vosk import Model, KaldiRecognizer
+import json
 
-import pyttsx3, pyaudio, vosk
+engine = pyttsx3.init()
+engine.setProperty('rate', 150)
+voices = engine.getProperty('voices')
+engine.setProperty('voice', voices[0].id)
 
+if not os.path.exists("vosk-model-small-ru-0.22"):
+    print("Пожалуйста, скачайте модель распознавания речи с https://alphacephei.com/vosk/models")
+    exit(1)
 
+model = Model("vosk-model-small-ru-0.22")
+recognizer = KaldiRecognizer(model, 16000)
 
-class Speech:
-    def __init__(self):
-        self.speaker = 0
-        self.tts = pyttsx3.init('sapi5')
+p = pyaudio.PyAudio()
+stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=8000)
+stream.start_stream()
 
-    def set_voice(self, speaker):
-        self.voices = self.tts.getProperty('voices')
-        for count, voice in enumerate(self.voices):
-            if count == 0:
-                print('0')
-                id = voice.id
-            if speaker == count:
-                id = voice.id
-        return id
+FACTS_FILE = "math_facts.txt"
 
-    def text2voice(self, speaker=0, text='Готов'):
-        self.tts.setProperty('voice', self.set_voice(speaker))
-        self.tts.say(text)
-        self.tts.runAndWait()
-
-
-class Recognize:
-    def __init__(self):
-        model = vosk.Model('model_small')
-        self.record = vosk.KaldiRecognizer(model, 16000)
-        self.stream()
-
-    def stream(self):
-        pa = pyaudio.PyAudio()
-        self.stream = pa.open(format=pyaudio.paInt16,
-                         channels=1,
-                         rate=16000,
-                         input=True,
-                         frames_per_buffer=8000)
-
-
-    def listen(self):
-        while True:
-            data = self.stream.read(4000, exception_on_overflow=False)
-            if self.record.AcceptWaveform(data) and len(data) > 0:
-                answer = json.loads(self.record.Result())
-                if answer['text']:
-                    yield answer['text']
-
+current_fact = ""
 
 def speak(text):
-    speech = Speech()
-    speech.text2voice(speaker=1, text=text)
+    print(text)
+    engine.say(text)
+    engine.runAndWait()
 
+def get_math_fact():
+    global current_fact
+    try:
+        response = requests.get("http://numbersapi.com/random/math?json")
+        data = response.json()
+        current_fact = data["text"]
+        return current_fact
+    except Exception as e:
+        speak("Произошла ошибка при получении факта")
+        print(f"Ошибка: {e}")
+        return None
 
-rec = Recognize()
-text_gen = rec.listen()
-rec.stream.stop_stream()
-speak('Starting')
-time.sleep(0.5)
-rec.stream.start_stream()
-for text in text_gen:
-    if text == 'закрыть':
-        speak('Бывай, ихтиандр')
-        quit()
-    else:
-        print(text)
+def save_fact_to_file():
+    if not current_fact:
+        speak("Сначала получите факт командой 'факт'")
+        return
+    
+    try:
+        with open(FACTS_FILE, "a", encoding="utf-8") as f:
+            f.write(current_fact + "\n")
+        speak("Факт успешно записан в файл")
+    except Exception as e:
+        speak("Произошла ошибка при записи в файл")
+        print(f"Ошибка: {e}")
+
+def delete_last_fact():
+    try:
+        with open(FACTS_FILE, "r+", encoding="utf-8") as f:
+            lines = f.readlines()
+            if not lines:
+                speak("Файл с фактами пуст")
+                return
+            
+            f.seek(0)
+            f.truncate()
+            f.writelines(lines[:-1])
+        
+        speak("Последний факт удалён из файла")
+    except FileNotFoundError:
+        speak("Файл с фактами не найден")
+    except Exception as e:
+        speak("Произошла ошибка при удалении факта")
+        print(f"Ошибка: {e}")
+
+def listen_command():
+    print("Слушаю команду...")
+    
+    while True:
+        data = stream.read(4000, exception_on_overflow=False)
+        if recognizer.AcceptWaveform(data):
+            result = json.loads(recognizer.Result())
+            command = result.get("text", "").lower()
+            print(f"Распознано: {command}")
+            return command
+
+def main():
+    speak("Голосовой ассистент для математических фактов запущен. Ожидаю команду.")
+    
+    while True:
+        command = listen_command()
+        
+        if "факт" in command:
+            fact = get_math_fact()
+            if fact:
+                speak(fact)
+        
+        elif "следующий" in command:
+            fact = get_math_fact()
+            if fact:
+                speak("Вот новый факт")
+                speak(fact)
+        
+        elif "прочитать" in command:
+            if current_fact:
+                speak(current_fact)
+            else:
+                speak("Сначала получите факт командой 'факт'")
+        
+        elif "записать" in command:
+            save_fact_to_file()
+        
+        elif "удалить" in command:
+            delete_last_fact()
+        
+        elif "выход" in command or "стоп" in command:
+            speak("Завершаю работу")
+            break
+        
+        else:
+            speak("Команда не распознана. Попробуйте ещё раз")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nЗавершение работы...")
+    finally:
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
